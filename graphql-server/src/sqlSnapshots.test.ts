@@ -8,6 +8,9 @@ import {
   getOperations,
   getLedgers,
   getAccounts,
+  getContracts,
+  getSharedWasmContracts,
+  getNetworkStats,
   getEventsByContract,
   getContractStorageEntries,
   getActivityRollups,
@@ -404,49 +407,62 @@ test('SQL snapshot: getTopAccountsByActivity all time', async () => {
   verifySqlSnapshot('getTopAccountsByActivity_all', q.sql, q.params);
 });
 
-// ─── Activity Rollups SQL Snapshots (#460, #461) ─────────────────────────────
+// ─── Contracts SQL Snapshots (#457) ──────────────────────────────────────────
 
-test('SQL snapshot: getActivityRollups default query', async () => {
+test('SQL snapshot: getContracts default query', async () => {
   const { pool, getLastQuery } = fakePool();
-  await getActivityRollups(
-    pool,
-    'mainnet',
-    'hour',
-    '2026-01-01T00:00:00Z',
-    '2026-01-02T00:00:00Z',
-    24
-  );
+  await getContracts(pool, 'mainnet', 20);
   const q = getLastQuery();
-  assert.deepEqual(q.params, [
-    'mainnet',
-    'hour',
-    '2026-01-01T00:00:00Z',
-    '2026-01-02T00:00:00Z',
-    24,
-  ]);
-  assert.match(q.sql, /WHERE network = \$1/);
+  assert.deepEqual(q.params, ['mainnet', 20]);
+  assert.ok(!q.sql.includes('mainnet'));
+  assert.match(q.sql, /\bWHERE\b.*\bnetwork\s*=\s*\$1\b/);
   assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
-  assert.doesNotMatch(q.sql, /mainnet|2026-01-01/);
-  verifySqlSnapshot('getActivityRollups_default', q.sql, q.params);
+  verifySqlSnapshot('getContracts_default', q.sql, q.params);
 });
 
-test('SQL snapshot: getRollupConsistency rollup and base queries', async () => {
-  const { pool, getQueries } = fakePool();
-  await getRollupConsistency(pool, 'mainnet', 'hour', '2026-01-01T00:00:00Z');
-  const queries = getQueries();
-  assert.equal(queries.length, 2);
+test('SQL snapshot: getContracts paginated with keyset cursor', async () => {
+  const { pool, getLastQuery } = fakePool();
+  await getContracts(pool, 'testnet', 20, '500000');
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['testnet', '500000', 20]);
+  assert.ok(!q.sql.includes('testnet'));
+  assert.ok(!q.sql.includes('500000'));
+  assert.match(q.sql, /\bWHERE\b.*\bnetwork\s*=\s*\$1\b/);
+  assert.match(q.sql, /deployed_ledger < \$2/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getContracts_paginated', q.sql, q.params);
+});
 
-  const rollupQuery = queries[0]!;
-  assert.deepEqual(rollupQuery.params, ['mainnet', 'hour', '2026-01-01T00:00:00Z']);
-  assert.match(rollupQuery.sql, /WHERE network = \$1/);
-  assert.doesNotMatch(rollupQuery.sql, /\bOFFSET\b/i);
-  assert.doesNotMatch(rollupQuery.sql, /mainnet|2026-01-01/);
-  verifySqlSnapshot('getRollupConsistency_rollup', rollupQuery.sql, rollupQuery.params);
+// ─── Shared Wasm Contracts SQL Snapshots (#458) ──────────────────────────────
 
-  const baseQuery = queries[1]!;
-  assert.deepEqual(baseQuery.params, ['mainnet', '2026-01-01T00:00:00Z', 'hour']);
-  assert.match(baseQuery.sql, /WHERE network = \$1/);
-  assert.doesNotMatch(baseQuery.sql, /\bOFFSET\b/i);
-  assert.doesNotMatch(baseQuery.sql, /mainnet|2026-01-01/);
-  verifySqlSnapshot('getRollupConsistency_base', baseQuery.sql, baseQuery.params);
+test('SQL snapshot: getSharedWasmContracts default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const excludeContractId = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+  await getSharedWasmContracts(pool, 'mainnet', 'wasm_abc123', excludeContractId, 10);
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet', 'wasm_abc123', excludeContractId, 10]);
+  assert.ok(!q.sql.includes('mainnet'));
+  assert.ok(!q.sql.includes('wasm_abc123'));
+  assert.ok(!q.sql.includes(excludeContractId));
+  assert.match(q.sql, /\bWHERE\b.*\bnetwork\s*=\s*\$1\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getSharedWasmContracts_default', q.sql, q.params);
+});
+
+// ─── Network Stats SQL Snapshots (#459) ──────────────────────────────────────
+
+test('SQL snapshot: getNetworkStats default query', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const startTime = '2026-01-01T00:00:00Z';
+  const endTime = '2026-01-08T00:00:00Z';
+  await getNetworkStats(pool, 'mainnet', startTime, endTime, 'DAY', 50);
+  const q = getLastQuery();
+  assert.deepEqual(q.params, ['mainnet', 'DAY', startTime, endTime, 50]);
+  assert.ok(!q.sql.includes('mainnet'));
+  assert.ok(!q.sql.includes('DAY'));
+  assert.ok(!q.sql.includes(startTime));
+  assert.ok(!q.sql.includes(endTime));
+  assert.match(q.sql, /\bWHERE\b.*\bnetwork\s*=\s*\$1\b/);
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  verifySqlSnapshot('getNetworkStats_default', q.sql, q.params);
 });
