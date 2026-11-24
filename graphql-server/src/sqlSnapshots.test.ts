@@ -12,6 +12,7 @@ import {
   getTransactionByHash,
   getTransactionsByLedger,
   getOperations,
+  getOperationsByTransactionHash,
   getAccountOperations,
   getLedgers,
   getLatestLedgerFromDb,
@@ -197,6 +198,21 @@ test('SQL snapshot: getOperations filtered by account and type', async () => {
   });
   const q = getLastQuery();
   verifySqlSnapshot('getOperations_filtered', q.sql, q.params);
+});
+
+test('SQL snapshot: getOperationsByTransactionHash', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const hash = 'tx-hash-not-interpolated-123';
+  const network = 'testnet';
+  await getOperationsByTransactionHash(pool, network, hash);
+  const q = getLastQuery();
+
+  assert.match(q.sql, /WHERE transaction_hash = \$1 AND network = \$2/);
+  assert.doesNotMatch(q.sql, new RegExp(hash));
+  assert.doesNotMatch(q.sql, new RegExp(network));
+  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
+  assert.deepEqual(q.params, [hash, network]);
+  verifySqlSnapshot('getOperationsByTransactionHash_default', q.sql, q.params);
 });
 
 test('SQL snapshot: getOperations paginated forward', async () => {
