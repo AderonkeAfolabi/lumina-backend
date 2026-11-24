@@ -2,10 +2,17 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import {
-  isMigrationIrreversible, loadDownMigrations, loadMigrations, migrationStatus, rollbackLastMigration,
-  rollbackMigration, runMigrations, splitStatements, type Migration,
+  isMigrationIrreversible,
+  loadDownMigrations,
+  loadMigrations,
+  migrationStatus,
+  rollbackLastMigration,
+  rollbackMigration,
+  runMigrations,
+  splitStatements,
+  type Migration,
 } from './migrations';
 
 const MIGRATIONS_DIR = join(__dirname, '..', '..', 'db', 'migrations');
@@ -127,11 +134,52 @@ test('concurrent migrations are sent one statement at a time', () => {
   ]);
 });
 
+test('splits the initial schema without breaking dollar-quoted functions', () => {
+  const migration = loadMigrations(MIGRATIONS_DIR).find(item => item.version === '001_init');
+  assert.ok(migration);
+
+  const statements = splitStatements(migration.sql);
+  const ensurePartitions = statements.find(statement =>
+    statement.includes('CREATE OR REPLACE FUNCTION ensure_operations_partitions')
+  );
+  assert.ok(ensurePartitions);
+  assert.match(ensurePartitions, /RETURNS void AS \$\$[\s\S]*END;\s*\$\$ LANGUAGE plpgsql/);
+});
+
 test('migration status refuses a later migration when an earlier one is pending', async () => {
   const pool = { query: async () => ({ rows: [{ version: '002_account_event_columns' }] }) } as unknown as Pool;
   await assert.rejects(() => migrationStatus(pool, [
     { version: '001_init', sql: '' }, { version: '002_account_event_columns', sql: '' },
   ]), /out of order/);
+});
+
+test('runMigrations records history for scripts without a history insert', async () => {
+  const recorded: string[] = [];
+  const statements: string[] = [];
+  const client = {
+    query: async (sql: string, values?: unknown[]) => {
+      statements.push(sql);
+      if (sql.startsWith('SELECT version FROM schema_migrations')) {
+        return { rows: recorded.map(version => ({ version })) };
+      }
+      if (sql.startsWith('INSERT INTO schema_migrations')) {
+        const version = values?.[0];
+        assert.equal(typeof version, 'string');
+        if (typeof version === 'string') recorded.push(version);
+      }
+      return { rows: [] };
+    },
+    release: () => undefined,
+  } as unknown as PoolClient;
+  const pool = { connect: async () => client } as unknown as Pool;
+  const version = '20261124120000_test_migration_history';
+
+  const status = await runMigrations(pool, [{ version, sql: 'CREATE TABLE example (id INTEGER);' }]);
+
+  assert.deepEqual(status.applied, [version]);
+  assert.deepEqual(recorded, [version]);
+  assert.ok(statements.includes('BEGIN'));
+  assert.ok(statements.includes('COMMIT'));
 });
 
 test('loadDownMigrations loads all down migration scripts', () => {
@@ -189,12 +237,17 @@ function recordingPool(applied: string[], failOn?: string): { pool: Pool; sent: 
         : /pg_advisory_unlock/.test(sql) ? 'unlock'
         : /pg_advisory_lock/.test(sql) ? 'lock'
         : /^SELECT version FROM schema_migrations ORDER BY version$/.test(sql) ? 'read history'
+        : /^INSERT INTO schema_migrations \(version\) VALUES \(\$1\)/.test(sql) ? 'record migration'
         : /ORDER BY applied_at DESC/.test(sql) ? 'read latest'
         : /^SELECT version FROM schema_migrations WHERE version = \$1$/.test(sql) ? 'check applied'
         : sql.replace(/\s+/g, ' ').trim();
       sent.push(label);
       if (failOn !== undefined && sql === failOn) throw new Error('syntax error at or near "BOOM"');
       if (label === 'read history') return { rows: applied.map(version => ({ version })) };
+      if (label === 'record migration') {
+        const version = params?.[0];
+        if (typeof version === 'string' && !applied.includes(version)) applied.push(version);
+      }
       if (label === 'read latest') return { rows: applied.slice(0, 1).map(version => ({ version })) };
       if (label === 'check applied') return { rows: applied.filter(version => version === params?.[0]).map(version => ({ version })) };
       return { rows: [] };
@@ -221,9 +274,11 @@ test('runMigrations applies pending migrations in order, each in its own transac
     'read history',
     'BEGIN',
     'CREATE TABLE b ()',
+    'record migration',
     'COMMIT',
     'CREATE INDEX CONCURRENTLY x ON t (c)',
     'CREATE INDEX CONCURRENTLY y ON t (d)',
+    'record migration',
     'read history',
     'unlock',
     'RELEASE',
