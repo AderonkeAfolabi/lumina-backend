@@ -15,7 +15,7 @@ import {
   getOperationsByTransactionHash,
   getAccountOperations,
   getLedgers,
-  getLatestLedgerFromDb,
+  getLedgerBySequence,
   getAccounts,
   getAccountSigners,
   getSponsoredAccounts,
@@ -268,18 +268,20 @@ test('SQL snapshot: getLedgers paginated backward', async () => {
   verifySqlSnapshot('getLedgers_backward', q.sql, q.params);
 });
 
-test('SQL snapshot: getLatestLedgerFromDb representative arguments', async () => {
+test('SQL snapshot: getLedgerBySequence', async () => {
   const { pool, getLastQuery } = fakePool();
-  await getLatestLedgerFromDb(pool, 'mainnet');
+  await getLedgerBySequence(pool, 'mainnet', 500000);
   const q = getLastQuery();
+  verifySqlSnapshot('getLedgerBySequence', q.sql, q.params);
 
-  assert.deepEqual(q.params, ['mainnet']);
-  assert.match(q.sql, /FROM ledgers WHERE network = \$1/);
-  assert.doesNotMatch(q.sql, /mainnet/i);
+  // Values are bound, never interpolated into the statement.
+  assert.deepStrictEqual(q.params, [500000, 'mainnet']);
+  assert.ok(!q.sql.includes('500000'), 'sequence must be a bound parameter');
+  assert.ok(!q.sql.includes('mainnet'), 'network must be a bound parameter');
+  // The network scopes the lookup, so the same sequence on another network never matches.
+  assert.match(q.sql, /WHERE sequence = \$1 AND network = \$2/);
+  // A point lookup: no pagination at all.
   assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
-  assert.match(q.sql, /\bORDER BY sequence DESC LIMIT 1\b/);
-
-  verifySqlSnapshot('getLatestLedgerFromDb_representative', q.sql, q.params);
 });
 
 // ─── Accounts SQL Snapshots ──────────────────────────────────────────────────
