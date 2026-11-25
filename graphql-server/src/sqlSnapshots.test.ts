@@ -10,8 +10,7 @@ import {
   getTableCountEstimateOrExact,
   getTradesFromDb,
   getTransactions,
-  getTransactionByHash,
-  getTransactionsByLedger,
+  getAccountTransactions,
   getOperations,
   getOperationsByTransactionHash,
   getAccountOperations,
@@ -167,17 +166,21 @@ test('SQL snapshot: getTransactions ascending order', async () => {
   verifySqlSnapshot('getTransactions_ascending', q.sql, q.params);
 });
 
-// ─── Transaction By Hash SQL Snapshots ───────────────────────────────────────
+// ─── Account Transactions SQL Snapshots ──────────────────────────────────────
 
-test('SQL snapshot: getTransactionByHash', async () => {
+test('SQL snapshot: getAccountTransactions representative arguments', async () => {
   const { pool, getLastQuery } = fakePool();
-  await getTransactionByHash(pool, 'mainnet', 'abc123hash');
+  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
+  await getAccountTransactions(pool, 'mainnet', address, 20);
   const q = getLastQuery();
-  assert.match(q.sql, /hash = \$1 AND network = \$2/);
-  assert.doesNotMatch(q.sql, /abc123hash|mainnet/);
+
+  assert.deepEqual(q.params, [address, 'mainnet', 20]);
+  assert.match(q.sql, /WHERE source_account = \$1 AND network = \$2/);
+  assert.doesNotMatch(q.sql, /mainnet|GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ/i);
   assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
-  assert.deepEqual(q.params, ['abc123hash', 'mainnet']);
-  verifySqlSnapshot('getTransactionByHash_default', q.sql, q.params);
+  assert.match(q.sql, /\bLIMIT \$3\b/);
+
+  verifySqlSnapshot('getAccountTransactions_representative', q.sql, q.params);
 });
 
 // ─── Operations SQL Snapshots ────────────────────────────────────────────────
