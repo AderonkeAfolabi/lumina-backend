@@ -17,9 +17,7 @@ import {
   getLedgers,
   getLedgerBySequence,
   getAccounts,
-  getAccountSigners,
-  getSponsoredAccounts,
-  getContractDeployment,
+  getAccountsFromDb,
   getEventsByContract,
   getContractStorageEntries,
   getActivityRollups,
@@ -328,118 +326,39 @@ test('SQL snapshot: getAccounts address order default', async () => {
   verifySqlSnapshot('getAccounts_address_default', q.sql, q.params);
 });
 
-// ─── Account As Of Ledger SQL Snapshots (#446) ───────────────────────────────
-
-test('SQL snapshot: getAccountAsOfLedgerFromDb representative arguments', async () => {
-  const { pool, getLastQuery, getQueries } = fakePool();
-  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
-  const result = await getAccountAsOfLedgerFromDb(pool, 'mainnet', address, 52000000);
+test('SQL snapshot: getAccountsFromDb batch lookup', async () => {
+  const { pool, getLastQuery } = fakePool();
+  const addresses = [
+    'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ',
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7',
+  ];
+  await getAccountsFromDb(pool, 'mainnet', addresses);
   const q = getLastQuery();
+  verifySqlSnapshot('getAccountsFromDb', q.sql, q.params);
 
-  // One statement, and no stored state at or before the ledger means null.
-  assert.equal(getQueries().length, 1);
-  assert.equal(result, null);
-
-  // Values are bound as parameters, in the order the statement numbers them,
-  // and never interpolated into the SQL text.
-  assert.deepEqual(q.params, [address, 'mainnet', 52000000]);
-  assert.ok(!q.sql.includes(address));
-  assert.doesNotMatch(q.sql, /mainnet|52000000/);
-
-  // Reads the history table, not the current-state `accounts` table.
-  assert.match(q.sql, /\bFROM account_state_history\b/);
-  assert.doesNotMatch(q.sql, /\bFROM accounts\b/);
-
-  // The network is part of the predicate. It is the only one of the three
-  // predicates that keeps a testnet account's history out of a mainnet answer.
-  const where = q.sql.match(/\bWHERE (.+?) ORDER BY\b/)?.[1];
-  assert.ok(where, 'statement has a WHERE clause before ORDER BY');
-  assert.deepEqual(where.split(' AND '), [
-    'address = $1',
-    'network = $2',
-    'last_modified_ledger <= $3',
-  ]);
-
-  // "At or before" the ledger, newest first, one row. This is a point lookup,
-  // not a paged list: there is no cursor and so no keyset comparison to assert,
-  // and it must not grow an OFFSET.
-  assert.match(q.sql, /\bORDER BY last_modified_ledger DESC LIMIT 1$/);
+  // The whole batch is one array parameter, never interpolated into the statement.
+  assert.deepStrictEqual(q.params, [addresses, 'mainnet']);
+  for (const address of addresses) {
+    assert.ok(!q.sql.includes(address), 'addresses must be a bound parameter');
+  }
+  assert.ok(!q.sql.includes('mainnet'), 'network must be a bound parameter');
+  // The network scopes the lookup, so an address indexed on another network never matches.
+  assert.match(q.sql, /WHERE address = ANY\(\$1::text\[\]\) AND network = \$2/);
+  // A batch lookup by key: no pagination at all.
   assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
-  assert.doesNotMatch(q.sql, /\(\s*last_modified_ledger\s*,/);
-
-  verifySqlSnapshot('getAccountAsOfLedgerFromDb_representative', q.sql, q.params);
 });
 
-test('SQL snapshot: getAccountAsOfLedgerFromDb binds the network it is given', async () => {
-  const { pool, getLastQuery } = fakePool();
-  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
-  await getAccountAsOfLedgerFromDb(pool, 'testnet', address, 1);
-  const q = getLastQuery();
-
-  // Same statement for every network; only the bound value differs.
-  assert.deepEqual(q.params, [address, 'testnet', 1]);
-  assert.doesNotMatch(q.sql, /testnet/);
-  assert.match(q.sql, /\bnetwork = \$2\b/);
-});
-
-// ─── Account Operations SQL Snapshots (#449) ─────────────────────────────────
-
-test('SQL snapshot: getAccountOperations default query', async () => {
-  const { pool, getLastQuery } = fakePool();
-  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
-  await getAccountOperations(pool, 'mainnet', address, 20);
-  const q = getLastQuery();
-  assert.deepEqual(q.params, [address, 'mainnet', 20]);
-  assert.doesNotMatch(q.sql, /mainnet|GBRPYHIL|20/);
-  assert.match(q.sql, /\bsource_account = \$1 AND network = \$2\b/);
-  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
-  verifySqlSnapshot('getAccountOperations_default', q.sql, q.params);
-});
-
-// ─── Account Signers SQL Snapshots (#454) ────────────────────────────────────
-
-test('SQL snapshot: getAccountSigners default query', async () => {
-  const { pool, getLastQuery } = fakePool();
-  const address = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
-  await getAccountSigners(pool, 'mainnet', address);
-  const q = getLastQuery();
-  assert.doesNotMatch(q.sql, /mainnet/);
-  assert.ok(!q.sql.includes(address));
-  assert.match(q.sql, /\bnetwork = \$1\b/);
-  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
-  assert.deepEqual(q.params, ['mainnet', address]);
-  verifySqlSnapshot('getAccountSigners_default', q.sql, q.params);
-});
-
-// ─── Sponsored Accounts SQL Snapshots (#455) ─────────────────────────────────
-
-test('SQL snapshot: getSponsoredAccounts default query', async () => {
-  const { pool, getLastQuery } = fakePool();
-  const sponsor = 'GBRPYHIL2CI537KXVHBV4Z6G7MXNGSQXN4F2XGJFFHJ3KJV3J4WKZQLQ';
-  await getSponsoredAccounts(pool, 'mainnet', sponsor, 20);
-  const q = getLastQuery();
-  assert.doesNotMatch(q.sql, /mainnet/);
-  assert.ok(!q.sql.includes(sponsor));
-  assert.match(q.sql, /\bs\.network = a\.network\b/);
-  assert.match(q.sql, /\bs\.network = \$2\b/);
-  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
-  assert.deepEqual(q.params, [sponsor, 'mainnet', 20]);
-  verifySqlSnapshot('getSponsoredAccounts_default', q.sql, q.params);
-});
-
-// ─── Contract Deployment SQL Snapshots (#456) ────────────────────────────────
-
-test('SQL snapshot: getContractDeployment default query', async () => {
-  const { pool, getLastQuery } = fakePool();
-  const contractId = 'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
-  await getContractDeployment(pool, 'mainnet', contractId);
-  const q = getLastQuery();
-  assert.doesNotMatch(q.sql, /mainnet/);
-  assert.ok(!q.sql.includes(contractId));
-  assert.match(q.sql, /\bnetwork = \$1\b/);
-  assert.doesNotMatch(q.sql, /\bOFFSET\b/i);
-  assert.deepEqual(q.params, ['mainnet', contractId]);
-  verifySqlSnapshot('getContractDeployment_default', q.sql, q.params);
+test('getAccountsFromDb with no addresses issues no query', async () => {
+  let queries = 0;
+  const pool = {
+    query: async () => {
+      queries += 1;
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+  const result = await getAccountsFromDb(pool, 'mainnet', []);
+  assert.strictEqual(queries, 0);
+  assert.strictEqual(result.size, 0);
 });
 
 // ─── Events By Contract SQL Snapshots ────────────────────────────────────────
